@@ -7,6 +7,7 @@
   2) 5년 이동평균선 겹쳐 표시
   3) 사이드바 연도 범위 슬라이더
   4) 값이 없는 연도는 선을 끊어서 표시 (임의 연결 없음)
+  5) 추가 그래프: 히트맵, 산점도, 막대그래프
 - 필요 라이브러리: streamlit, pandas, plotly
 """
 
@@ -14,17 +15,8 @@ import os
 
 import streamlit as st
 import pandas as pd
-
-# plotly 임포트 실패 대비 (없으면 안내 후 종료)
-try:
-    import plotly.graph_objects as go
-except ImportError:
-    st.error(
-        "그래프용 라이브러리 'plotly'가 설치되지 않았습니다. "
-        "아래 명령어로 설치한 뒤 다시 실행하세요: "
-        "pip install plotly"
-    )
-    st.stop()
+import plotly.graph_objects as go
+import plotly.express as px
 
 st.set_page_config(page_title="서울 기온 분석", page_icon="🌡️", layout="wide")
 
@@ -84,6 +76,10 @@ def load_data(path):
 # ---------------- 데이터 로드 ----------------
 df = load_data(CSV_PATH)
 df["연도"] = df["날짜"].dt.year
+
+if df.empty:
+    st.error("데이터가 비어 있습니다. CSV 파일의 내용을 확인하세요.")
+    st.stop()
 
 # ---------------- 사이드바 ----------------
 st.title("서울 기온 분석 🌡️")
@@ -203,7 +199,6 @@ st.caption(
 hot_year = yearly.loc[yearly["연평균기온"].idxmax()]
 cold_year = yearly.loc[yearly["연평균기온"].idxmin()]
 hot_day = dff.loc[dff["평균기온(℃)"].idxmax()]
-
 st.subheader("극단값 참고 (전체 데이터 기준)")
 st.dataframe(
     pd.DataFrame(
@@ -256,6 +251,150 @@ st.caption(
     "(가장 큰 값·작은 값과 해당 날짜)"
 )
 
+# ---------------- 추가 그래프 작성을 위한 전처리 ----------------
+dff["월"] = dff["날짜"].dt.month
+
+
+def season_of(m):
+    if m in [3, 4, 5]:
+        return "봄"
+    if m in [6, 7, 8]:
+        return "여름"
+    if m in [9, 10, 11]:
+        return "가을"
+    return "겨울"
+
+
+dff["계절"] = dff["월"].map(season_of)
+
+# ---------------- 추가 그래프 ----------------
+st.subheader("다양한 그래프 추가")
+
+# 1) 히트맵: 연도 × 월 평균기온
+st.write("**히트맵: 연도 × 월 평균기온**")
+heatmap_pivot = dff.pivot_table(
+    index="연도", columns="월", values="평균기온(℃)", aggfunc="mean"
+)
+fig_heat = go.Figure(
+    data=go.Heatmap(
+        z=heatmap_pivot.values,
+        x=heatmap_pivot.columns,
+        y=heatmap_pivot.index,
+        colorscale="RdYlBu_r",
+        colorbar=dict(title="℃"),
+        hovertemplate="연도=%{y}월=%{x}<br>평균기온= %{z:.2f} ℃<extra></extra>",
+    )
+)
+fig_heat.update_layout(
+    title="연도 × 월 평균기온 히트맵",
+    xaxis_title="월",
+    yaxis_title="연도",
+    margin=dict(l=40, r=20, t=40, b=30),
+)
+st.plotly_chart(fig_heat, use_container_width=True)
+st.caption(
+    "짙은 빨강 = 높은 기온, 짙은 파랑 = 낮은 기온. "
+    "각 칸은 해당 연도·월의 평균기온이며, 관측이 없는 조합은 비어 보입니다."
+)
+
+# 2) 산점도: 일별 평균기온 vs 최고기온 (색으로 계절)
+st.write("**산점도: 일별 평균기온 vs 최고기온**")
+fig_scatter = px.scatter(
+    dff,
+    x="평균기온(℃)",
+    y="최고기온(℃)",
+    color="계절",
+    opacity=0.4,
+    title="일별 평균기온 vs 최고기온",
+    labels={
+        "평균기온(℃)": "평균기온(℃)",
+        "최고기온(℃)": "최고기온(℃)",
+        "계절": "계절",
+    },
+)
+fig_scatter.update_traces(marker_size=4)
+fig_scatter.update_layout(
+    xaxis_title="평균기온(℃)",
+    yaxis_title="최고기온(℃)",
+    margin=dict(l=40, r=20, t=40, b=30),
+)
+st.plotly_chart(fig_scatter, use_container_width=True)
+st.caption(
+    "점이 위쪽으로 퍼져 있을수록 일교차가 큽니다. "
+    "점의 분포에서 이상값과 계절별 패턴, 평균과 최고의 관계를 확인할 수 있습니다."
+)
+
+# 3) 막대: 월별 최저/평균/최고 평균 (계절성 비교)
+st.write("**막대: 월별 최저/평균/최고 평균기온**")
+monthly_stats = dff.groupby("월").agg(
+    최저기온_평균=("최저기온(℃)", "mean"),
+    평균기온_평균=("평균기온(℃)", "mean"),
+    최고기온_평균=("최고기온(℃)", "mean"),
+).reset_index()
+fig_bar = go.Figure()
+fig_bar.add_trace(
+    go.Bar(
+        x=monthly_stats["월"],
+        y=monthly_stats["최저기온_평균"],
+        name="최저기온 평균",
+        marker_color="#2ca02c",
+    )
+)
+fig_bar.add_trace(
+    go.Bar(
+        x=monthly_stats["월"],
+        y=monthly_stats["평균기온_평균"],
+        name="평균기온 평균",
+        marker_color="#1f77b4",
+    )
+)
+fig_bar.add_trace(
+    go.Bar(
+        x=monthly_stats["월"],
+        y=monthly_stats["최고기온_평균"],
+        name="최고기온 평균",
+        marker_color="#d62728",
+    )
+)
+fig_bar.update_layout(
+    title="월별 평균기온·최저기온·최고기온",
+    xaxis_title="월",
+    yaxis_title="기온 (℃)",
+    barmode="group",
+    margin=dict(l=40, r=20, t=40, b=30),
+)
+st.plotly_chart(fig_bar, use_container_width=True)
+st.caption(
+    "12개월을 막대로 비교하면 계절별 기온 차이와 월별 극값(1월 가장 낮음, 8월 가장 높음)을 확인할 수 있습니다."
+)
+
+# 4) 막대: 연도별 관측 일수 (데이터 결측 확인)
+st.write("**막대: 연도별 관측 일수**")
+annual_counts = dff.groupby("연도").size().reset_index(name="관측일수")
+fig_count = px.bar(
+    annual_counts,
+    x="연도",
+    y="관측일수",
+    title="연도별 관측 일수",
+    labels={"연도": "연도", "관측일수": "관측 일수"},
+)
+fig_count.update_layout(margin=dict(l=40, r=20, t=40, b=30))
+st.plotly_chart(fig_count, use_container_width=True)
+st.caption(
+    "관측 일수가 0이거나 적으면 해당 연도 데이터가 거의 없어 연평균이 불안정할 수 있습니다."
+)
+
+# ---------------- 그래프를 통해 알 수 있는 점 ----------------
+st.subheader("그래프를 통해 알 수 있는 점")
+st.markdown(
+    """
+- **히트맵**: 특정 연도·월의 고온/저온 패턴, 여름과 겨울의 대비, 최근 연도 고온화 여부 확인 가능
+- **산점도**: 평균기온과 최고기온의 관계, 일교차 분포, 이상값 확인 가능
+- **월별 막대**: 계절별 기온 차이와 월별 극값(1월 가장 낮음, 8월 가장 높음) 확인 가능
+- **연간 관측일수 막대**: 관측 중단 연도(1950~1953 등)나 결측 연도를 확인 가능
+"""
+)
+
 # --- 처리 방법 ---
 with st.expander("1) 데이터 처리 방법"):
     st.markdown(
@@ -263,7 +402,7 @@ with st.expander("1) 데이터 처리 방법"):
 - **인코딩**: `utf-8-sig` 우선 시도, 실패 시 `cp949`(EUC-KR) 시도
 - **구분자**: `sep=None`(자동 감지) → 탭/콤마 혼합에도 대응
 - **날짜 앞의 탭**: 모든 문자열 컬럼을 `str.strip()` 처리 → 날짜 앞의 탭 문자 제거
-- **연도**: 날짜에서 `dt.year` 추출
+- **연도/계절**: 연도 `dt.year`, 월 `dt.month`, 계절 `month` 기준 자동 분류
 - **연평균기온**: 연도별 일별 `평균기온(℃)`의 평균
 - **5년 이동평균**: 관측 연도를 연도순으로 늘어놓은 뒤 5개 단위 이동 평균
   (초기 연도는 사용 가능한 관측값만 사용)
